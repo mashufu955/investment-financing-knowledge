@@ -1,0 +1,35 @@
+# 安全：密钥等敏感配置不入镜像（运行时配置由 docker compose 从根目录 .env 注入）
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 前端单独构建镜像，后端不需要
+frontend/
+
+# IDE / 版本控制
+.idea/
+.vscode/
+.git/
+.gitignore
+
+# 部署与文档（后端运行时不需要）
+deploy/
+database/
+docs/
+docker-investment-financing/
+
+# 本地大模型权重（运行时通过 volume 挂载，不入镜像）
+models/
+
+# 临时与数据文件
+uploads/
+tmp/
+*.log
+/.workbuddy/

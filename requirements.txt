@@ -1,0 +1,25 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+sqlalchemy==2.0.*
+pymysql==1.1.*
+cryptography==43.*
+pydantic==2.*
+pydantic-settings==2.*
+python-jose[cryptography]==3.3.*
+passlib[bcrypt]==1.7.*
+bcrypt==4.0.1
+python-multipart==0.0.9
+redis==5.*
+elasticsearch==8.*
+# 向量库（Milvus 存储文档切片向量，ES 仅保留关键字检索）
+# pymilvus 2.4 运行时依赖 pkg_resources，setuptools 82 起已移除，故钉在 <81
+setuptools<81
+pymilvus==2.4.*
+sse-starlette==2.*
+openai==1.*
+# 文档解析（PDF/Word/Markdown/TXT）
+pypdf==4.*
+python-docx==1.*
+markdown-it-py==3.*
+# 向量化（按所选 embedding 模型启用）
+sentence-transformers==3.*

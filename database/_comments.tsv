@@ -1,0 +1,48 @@
+TABLES	departments	NULL	å›¢é˜Ÿ/åŸºé‡‘/é¡¹ç›®èŒƒå›´
+TABLES	faqs	NULL	FAQ
+TABLES	knowledge_gaps	NULL	çŸ¥è¯†ç¼ºå£
+TABLES	knowledge_units	NULL	æŠ•èžèµ„çŸ¥è¯†å•å…ƒ
+TABLES	qa_access_logs	NULL	é—®ç­”è®¿é—®æ—¥å¿—
+TABLES	qa_messages	NULL	é—®ç­”æ¶ˆæ¯
+TABLES	qa_sessions	NULL	é—®ç­”ä¼šè¯
+TABLES	role_permissions	NULL	è§’è‰²æ“ä½œæƒé™
+TABLES	roles	NULL	è§’è‰²
+TABLES	unit_permissions	NULL	çŸ¥è¯†å•å…ƒæ•°æ®æƒé™
+TABLES	user_roles	NULL	ç”¨æˆ·è§’è‰²å…³è”
+TABLES	users	NULL	å†…éƒ¨å‘˜å·¥
+COLUMNS	departments	leader_id	è´Ÿè´£äºº
+COLUMNS	departments	name	å›¢é˜Ÿ/åŸºé‡‘/é¡¹ç›®ç»„åç§°
+COLUMNS	departments	parent_id	çˆ¶èŠ‚ç‚¹
+COLUMNS	faqs	category	å°½è°ƒ/æ¡æ¬¾/åˆè§„ç­‰
+COLUMNS	faqs	source_type	manual / auto_mined
+COLUMNS	faqs	status	pending_review / published / rejected
+COLUMNS	knowledge_gaps	question_pattern	ç¼ºå£é—®é¢˜æ¨¡å¼
+COLUMNS	knowledge_gaps	status	unresolved / resolved / ignored
+COLUMNS	knowledge_units	amount	èžèµ„é‡‘é¢
+COLUMNS	knowledge_units	category	ç±»åˆ«ï¼šå°½è°ƒ/æŠ•å†³/åè®®/æŠ•åŽç­‰
+COLUMNS	knowledge_units	confidential_level	ä¿å¯†çº§åˆ« 1~5
+COLUMNS	knowledge_units	content	æ­£æ–‡
+COLUMNS	knowledge_units	currency	å¸ç§
+COLUMNS	knowledge_units	deal_stage	é¡¹ç›®é˜¶æ®µï¼šå°½è°ƒ/æŠ•å†³/æŠ•åŽç­‰
+COLUMNS	knowledge_units	file_type	pdf/markdown/word/txt
+COLUMNS	knowledge_units	financing_round	èžèµ„è½®æ¬¡
+COLUMNS	knowledge_units	industry	è¡Œä¸šèµ›é“
+COLUMNS	knowledge_units	region	åœ°åŒº
+COLUMNS	knowledge_units	status	çŠ¶æ€ï¼šactive/archived/draft
+COLUMNS	knowledge_units	summary	æ‘˜è¦
+COLUMNS	knowledge_units	unit_code	çŸ¥è¯†å•å…ƒç¼–å·
+COLUMNS	knowledge_units	valuation	ä¼°å€¼
+COLUMNS	knowledge_units	version	ç‰ˆæœ¬å·
+COLUMNS	qa_messages	role	user / assistant
+COLUMNS	qa_sessions	title	ä¼šè¯æ ‡é¢˜ï¼ˆå–é¦–é—®ï¼‰
+COLUMNS	role_permissions	permission_code	æƒé™ç¼–ç ï¼Œå¦‚ knowledge:import
+COLUMNS	role_permissions	permission_type	menu / button
+COLUMNS	roles	role_code	è§’è‰²ç¼–ç 
+COLUMNS	roles	role_name	è§’è‰²åç§°
+COLUMNS	unit_permissions	target_id	å…¨å±€å…¬å¼€æ—¶ target_id=0
+COLUMNS	unit_permissions	target_type	global / department / role / user
+COLUMNS	users	department_id	æ‰€å±žå›¢é˜Ÿ/åŸºé‡‘/é¡¹ç›®ç»„
+COLUMNS	users	display_name	å§“å
+COLUMNS	users	password_hash	å¯†ç å“ˆå¸Œ
+COLUMNS	users	status	1 å¯ç”¨ 0 åœç”¨
+COLUMNS	users	username	ç™»å½•å

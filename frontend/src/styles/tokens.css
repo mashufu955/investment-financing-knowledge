@@ -1,0 +1,118 @@
+/* ============================================
+   tokens.css —— 投融资知识库设计令牌
+   视觉基准：ChatGPT 经典（深色侧边栏 + 浅色主区）
+   ============================================ */
+:root {
+  /* ---------- 色彩：品牌与主题 ---------- */
+  --color-primary: #10a37f;            /* ChatGPT 绿 */
+  --color-primary-hover: #0e8a6d;
+  --color-primary-active: #0d7b61;
+  --color-primary-soft: #e6f4f1;       /* 绿色浅底 */
+  --color-primary-contrast: #ffffff;   /* 绿底上的文字 */
+  --color-accent: #06b6d4;             /* 品牌渐变色：青 */
+
+  /* ---------- 色彩：侧边栏（深色恒定） ---------- */
+  --color-sidebar: #202123;            /* 经典 ChatGPT 深色 */
+  --color-sidebar-hover: #343541;      /* hover 提亮 */
+  --color-sidebar-active: #2a2b32;     /* 选中态 */
+  --color-sidebar-text: #ffffff;
+  --color-sidebar-text-muted: #8e8ea0; /* 次级文字 */
+
+  /* ---------- 色彩：主内容区（浅色） ---------- */
+  --color-bg: #ffffff;                 /* 主背景 */
+  --color-bg-subtle: #f7f7f8;          /* 浅灰：分组条/表格头/用户消息条 */
+  --color-bg-hover: #ececf1;           /* hover / 禁用 */
+  --color-surface: #ffffff;            /* 卡片/弹窗/输入框表面 */
+  --color-text: #343541;               /* 正文 */
+  --color-text-secondary: #6e6e80;     /* 次级文字 */
+  --color-text-muted: #8e8ea0;         /* 弱化/占位符 */
+  --color-border: #d9d9e3;             /* 常规描边 */
+  --color-border-strong: #c5c5d2;      /* 输入框描边 */
+
+  /* ---------- 色彩：状态 ---------- */
+  --color-danger: #dc2626;
+  --color-danger-soft: #fdecec;
+  --color-warning: #b7791f;
+  --color-warning-soft: #fdf3e7;
+  --color-warning-border: #e8d9bc;
+  --color-success: #10a37f;
+  --color-success-soft: #e6f4f1;
+  --color-code-bg: #0d0d0d;           /* Markdown 代码块 */
+  --color-code-text: #ececec;
+
+  /* ---------- 字体 ---------- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-base: 1.6;
+  --line-height-heading: 1.35;
+
+  /* ---------- 间距（4px 基准刻度） ---------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---------- 圆角 ---------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 999px;
+
+  /* ---------- 阴影 ---------- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.16);
+  --shadow-focus: 0 0 0 3px rgba(16, 163, 127, 0.16); /* 聚焦光环 */
+
+  /* ---------- 尺寸（布局） ---------- */
+  --sidebar-width: 260px;          /* 布局侧边栏 = 会话侧边栏 */
+  --content-max-width: 1200px;     /* 数据页容器 */
+  --chat-max-width: 768px;         /* 48rem 对话列 */
+  --topbar-height: 56px;
+
+  /* ---------- 层级 & 动效 ---------- */
+  --z-modal: 2000;
+  --z-toast: 3000;
+  --transition-fast: 0.15s ease;
+  --transition-base: 0.2s ease;
+}
+
+/* ---------- 预留：未来深色主题扩展点（本期不做切换按钮） ----------
+   只需整体覆盖语义变量即可获得全深色，侧边栏默认不变。
+[data-theme='dark'] {
+  --color-bg: #343541;
+  --color-bg-subtle: #40414f;
+  --color-bg-hover: #4e5061;
+  --color-surface: #3e3f4b;
+  --color-text: #ececf1;
+  --color-text-secondary: #acacbe;
+  --color-text-muted: #8e8ea0;
+  --color-border: #565869;
+  --color-border-strong: #8e8ea0;
+  --color-primary: #10a37f;
+  ...
+}
+-------------------------------------------------------------- */
