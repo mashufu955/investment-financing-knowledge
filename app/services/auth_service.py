@@ -45,6 +45,8 @@ class AuthService:
     def get_current_user(self, db: Session, user_id: int) -> dict:
         """查询当前用户身份、所属团队、基金/项目范围与拥有角色。"""
         user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
         return {
             "id": user.id,
             "username": user.username,

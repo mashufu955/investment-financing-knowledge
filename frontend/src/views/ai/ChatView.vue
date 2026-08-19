@@ -47,6 +47,12 @@
               <div class="msg-assistant-inner">
                 <span class="avatar assistant">AI</span>
                 <div class="msg-body">
+                  <!-- render_stage_indicator：检索/思考/生成过程提示 -->
+                  <div v-if="m.stage && m.stage !== 'done'" class="stage-indicator" :class="`stage-${m.stage}`">
+                    <span class="stage-dot"></span>
+                    <span class="stage-text">{{ stageText(m.stage) }}</span>
+                    <span v-if="m.stage === 'generating'" class="stage-detail">{{ m.retrievedCount ? `（已命中 ${m.retrievedCount} 个相关片段）` : '' }}</span>
+                  </div>
                   <!-- render_stream_markdown：流式 Markdown 渲染 -->
                   <StreamMarkdown :content="m.content" />
                   <!-- render_reference_card：引用来源卡片 -->
@@ -106,28 +112,45 @@ async function send_question() {
   if (!question.value.trim()) return
   const q = question.value
   messages.value.push({ role: 'user', content: q })
-  const assistant = { role: 'assistant', content: '', sources: [], unauthorized: [] }
+  const assistant = { role: 'assistant', content: '', sources: [], unauthorized: [], stage: 'retrieving', retrievedCount: 0 }
   messages.value.push(assistant)
   question.value = ''
   await chatStreamApi(q, currentSessionId, {
     onEvent(event, data) {
-      if (event === 'trace') {
+      if (event === 'status') {
+        assistant.stage = data.stage
+      } else if (event === 'trace') {
         currentSessionId = data.session_id
+        // 授权片段数用于生成阶段的展示
+        assistant.retrievedCount = (data.authorized_unit_ids || []).length
       } else if (event === 'answer') {
+        assistant.stage = 'generating'
         assistant.content += data.chunk
       } else if (event === 'sources') {
         assistant.sources = data
       } else if (event === 'permission_missing') {
-        assistant.unauthorized = data.unit_ids
+        assistant.unauthorized = data.units || data.unit_ids || []
       } else if (event === 'error') {
+        assistant.stage = 'done'
         assistant.content = (assistant.content || '') + `\n\n[错误] ${data.message || '请求失败'}`
       } else if (event === 'done') {
+        assistant.stage = 'done'
         render_history_list()
       }
     },
   }).catch((err) => {
+    assistant.stage = 'done'
     assistant.content = (assistant.content || '') + `\n\n[错误] 无法连接服务：${err?.message || err}`
   })
+}
+
+// stage_text：检索/思考/生成阶段文案
+function stageText(stage) {
+  return {
+    retrieving: '正在检索知识库…',
+    thinking: '正在分析并组织回答…',
+    generating: '正在生成回答…',
+  }[stage] || stage
 }
 
 async function render_history_list() {
@@ -299,6 +322,40 @@ onMounted(() => {
 .msg-body {
   flex: 1;
   min-width: 0;
+}
+
+/* ---------- 阶段指示器（检索/思考/生成过程） ---------- */
+.stage-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+.stage-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-muted);
+  animation: stage-pulse 1.2s ease-in-out infinite;
+}
+.stage-retrieving .stage-dot { background: var(--color-accent); }
+.stage-thinking  .stage-dot { background: #b7791f; }
+.stage-generating .stage-dot { background: var(--color-primary); }
+.stage-text {
+  font-weight: var(--font-weight-medium);
+}
+.stage-detail {
+  color: var(--color-text-muted);
+}
+@keyframes stage-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }
 
 /* ---------- 空态欢迎页 ---------- */

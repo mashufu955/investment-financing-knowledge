@@ -7,10 +7,11 @@ from app.config import settings
 
 app = FastAPI(title=settings.app_name, debug=settings.debug)
 
-# CORS：允许前端开发服务器访问
+# CORS：默认允许本地前端开发服务器；生产可经 CORS_ORIGINS 配置域名（逗号分隔）
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://106.55.0.45:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

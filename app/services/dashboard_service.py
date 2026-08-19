@@ -292,10 +292,25 @@ def render_project_pipeline(metrics: dict) -> dict:
 
 
 def record_access_log_async(db: Session, log: dict) -> None:
-    """异步写入访问日志，不阻塞问答链路。"""
+    """异步写入访问日志，不阻塞问答链路。
+
+    注意：不能在后台线程里复用 FastAPI 请求级的 `db` —— 请求结束（依赖注入的 get_db
+    finally 关闭）后 session 已失效，写入会静默失败，导致看板统计缺失。
+    因此 worker 线程内必须自建独立的 SessionLocal。
+    """
 
     def _worker():
-        DashboardService().record_access_log(db, log)
+        from app.core.database import SessionLocal
+
+        wdb = SessionLocal()
+        try:
+            DashboardService().record_access_log(wdb, log)
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("record_access_log 异步写入失败")
+        finally:
+            wdb.close()
 
     threading.Thread(target=_worker, daemon=True).start()
 

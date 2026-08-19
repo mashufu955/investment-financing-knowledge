@@ -3,12 +3,14 @@
 覆盖单文件/批量导入、格式解析、文本切片、项目字段抽取、
 知识单元 CRUD、版本与状态管理、向量化同步。
 """
+import json
 import os
 import re
 import threading
 from pathlib import Path
 
-from sqlalchemy import func, select
+from fastapi import HTTPException, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -18,6 +20,7 @@ from app.core.es import (
     ensure_knowledge_index,
     index_keyword_unit,
 )
+from app.core.redis import get_redis
 from app.core.milvus import (
     delete_unit_from_index,
     ensure_knowledge_collection,
@@ -29,11 +32,42 @@ from app.utils.document_parser import parse_markdown, parse_pdf, parse_txt, pars
 from app.utils.embeddings import embed_batch, embed_text
 from app.utils.text_splitter import split_text
 
-# 导入任务状态跟踪（内存级，进程重启后丢失）
-_import_tasks: dict[str, dict] = {}
-# 向量索引重建任务状态跟踪（内存级，进程重启后丢失）
-_reindex_tasks: dict[str, dict] = {}
-_task_lock = threading.Lock()
+# 导入/重建任务状态持久化到 Redis（进程重启不丢，TTL 1 小时）
+_IMPORT_TASK_PREFIX = "import_task:"
+_REINDEX_TASK_PREFIX = "reindex_task:"
+_TASK_TTL = 3600
+
+
+def _task_key(kind: str, task_id: str) -> str:
+    return f"{kind}{task_id}"
+
+
+def _read_task(kind: str, task_id: str) -> dict:
+    """读取任务状态；Redis 不可用时返回空 dict（调用方按未知任务处理）。"""
+    try:
+        raw = get_redis().get(_task_key(kind, task_id))
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_task(kind: str, task_id: str, data: dict) -> None:
+    try:
+        get_redis().setex(_task_key(kind, task_id), _TASK_TTL, json.dumps(data))
+    except Exception:
+        pass
+
+
+def _update_task(kind: str, task_id: str, **fields) -> None:
+    data = _read_task(kind, task_id)
+    data.update(fields)
+    _write_task(kind, task_id, data)
 
 
 _PARSERS = {
@@ -115,7 +149,7 @@ _STAGE_SYNONYMS = {
     "投后": "post_investment",
 }
 
-_ROUND_ENUM = {"seed", "angel", "series_a", "series_b", "series_c", "pre_ipo", "strategic", "other"}
+_ROUND_ENUM = {"seed", "angel", "pre_series_a", "series_a", "series_b", "series_c", "pre_ipo", "strategic", "other"}
 _CURRENCY_ENUM = {"CNY", "USD", "HKD", "EUR", "other"}
 _STAGE_ENUM = {"sourcing", "due_diligence", "investment_committee", "closing", "post_investment"}
 
@@ -154,14 +188,13 @@ class KnowledgeService:
                 "file_index": i,
             })
 
-        # 2. 记录任务状态
-        with _task_lock:
-            _import_tasks[task_id] = {
-                "status": "processing",
-                "total_files": len(saved_files),
-                "processed_files": 0,
-                "error": None,
-            }
+        # 2. 记录任务状态（Redis，进程重启不丢）
+        _write_task(_IMPORT_TASK_PREFIX, task_id, {
+            "status": "processing",
+            "total_files": len(saved_files),
+            "processed_files": 0,
+            "error": None,
+        })
 
         # 3. 启动后台线程
         thread = threading.Thread(
@@ -216,21 +249,15 @@ class KnowledgeService:
                     db.add(unit)
                     db.flush()
                     pending_units.append(unit)
-                # 更新已处理文件数
-                with _task_lock:
-                    if task_id in _import_tasks:
-                        _import_tasks[task_id]["processed_files"] += 1
-            # ---- 写入默认数据权限：confidential_level<=1 视为公开，全局可读；创建者本人始终可读 ----
-            for unit in pending_units:
-                if unit.confidential_level is not None and unit.confidential_level <= 1:
-                    db.add(UnitPermission(unit_id=unit.id, target_type="global", target_id=0))
-                db.add(UnitPermission(unit_id=unit.id, target_type="user", target_id=user_id))
+                # 更新已处理文件数（单任务单线程，无并发写）
+                task_data = _read_task(_IMPORT_TASK_PREFIX, task_id)
+                task_data["processed_files"] = task_data.get("processed_files", 0) + 1
+                _write_task(_IMPORT_TASK_PREFIX, task_id, task_data)
+            # ---- 数据权限（2.9.4）：默认状态下知识单元无任何访问权限，由知识管理员显式配置 ----
             # ---- 先把知识单元持久化到数据库（不依赖向量索引，保证列表可见） ----
             db.commit()
             # 业务数据提交成功后即标记完成，前端进度到 100%
-            with _task_lock:
-                if task_id in _import_tasks:
-                    _import_tasks[task_id]["status"] = "done"
+            _update_task(_IMPORT_TASK_PREFIX, task_id, status="done")
             # ---- 再批量向量化写入 Milvus + ES 关键字索引（后处理，失败不影响已入库数据） ----
             if pending_units:
                 try:
@@ -249,17 +276,13 @@ class KnowledgeService:
         except Exception as e:
             logger.exception("导入任务 %s 失败", task_id)
             db.rollback()
-            with _task_lock:
-                if task_id in _import_tasks:
-                    _import_tasks[task_id]["status"] = "error"
-                    _import_tasks[task_id]["error"] = str(e)
+            _update_task(_IMPORT_TASK_PREFIX, task_id, status="error", error=str(e))
         finally:
             db.close()
 
     def get_import_status(self, task_id: str) -> dict:
-        """查询导入任务状态（内存级）。"""
-        with _task_lock:
-            return dict(_import_tasks.get(task_id, {}))
+        """查询导入任务状态（Redis 持久化）。"""
+        return _read_task(_IMPORT_TASK_PREFIX, task_id)
 
     def parse_document(self, file_path: str, file_type: str) -> str:
         """解析 PDF / Markdown / Word / TXT 格式文档，返回纯文本。"""
@@ -522,14 +545,13 @@ class KnowledgeService:
     ) -> str:
         """后台异步触发向量索引重建（Milvus + ES 关键字），返回 task_id（用于前端/运维轮询）。"""
         task_id = os.urandom(8).hex()
-        with _task_lock:
-            _reindex_tasks[task_id] = {
-                "status": "processing",
-                "total": 0,
-                "indexed": 0,
-                "failed": 0,
-                "error": None,
-            }
+        _write_task(_REINDEX_TASK_PREFIX, task_id, {
+            "status": "processing",
+            "total": 0,
+            "indexed": 0,
+            "failed": 0,
+            "error": None,
+        })
         thread = threading.Thread(
             target=self._reindex_background,
             args=(task_id, status_filter, batch_size, index_status_filter),
@@ -552,10 +574,7 @@ class KnowledgeService:
         db = SessionLocal()
         try:
             def on_progress(done: int, total: int) -> None:
-                with _task_lock:
-                    if task_id in _reindex_tasks:
-                        _reindex_tasks[task_id]["total"] = total
-                        _reindex_tasks[task_id]["indexed"] = done
+                _update_task(_REINDEX_TASK_PREFIX, task_id, total=total, indexed=done)
 
             result = self.rebuild_vector_index(
                 db,
@@ -564,29 +583,23 @@ class KnowledgeService:
                 on_progress,
                 index_status_filter,
             )
-            with _task_lock:
-                if task_id in _reindex_tasks:
-                    _reindex_tasks[task_id].update(
-                        {
-                            "status": "done",
-                            "total": result["total"],
-                            "indexed": result["indexed"],
-                            "failed": len(result["failed"]),
-                        }
-                    )
+            _update_task(
+                _REINDEX_TASK_PREFIX,
+                task_id,
+                status="done",
+                total=result["total"],
+                indexed=result["indexed"],
+                failed=len(result["failed"]),
+            )
         except Exception as e:  # noqa: BLE001
             logger.exception("reindex 任务 %s 失败", task_id)
-            with _task_lock:
-                if task_id in _reindex_tasks:
-                    _reindex_tasks[task_id]["status"] = "error"
-                    _reindex_tasks[task_id]["error"] = str(e)
+            _update_task(_REINDEX_TASK_PREFIX, task_id, status="error", error=str(e))
         finally:
             db.close()
 
     def get_reindex_status(self, task_id: str) -> dict:
-        """查询向量索引重建任务状态（内存级）。"""
-        with _task_lock:
-            return dict(_reindex_tasks.get(task_id, {}))
+        """查询向量索引重建任务状态（Redis 持久化）。"""
+        return _read_task(_REINDEX_TASK_PREFIX, task_id)
 
     def manage_unit_version_status(
         self,
@@ -615,6 +628,11 @@ class KnowledgeService:
                 conditions.append(getattr(KnowledgeUnit, key) == query[key])
         if query.get("confidential_level"):
             conditions.append(KnowledgeUnit.confidential_level == query["confidential_level"])
+        if query.get("keyword"):
+            kw = f"%{query['keyword'].strip()}%"
+            conditions.append(
+                or_(KnowledgeUnit.title.like(kw), KnowledgeUnit.content.like(kw))
+            )
         if conditions:
             stmt = stmt.where(*conditions)
         page = max(1, query.get("page", 1))
@@ -669,10 +687,7 @@ class KnowledgeService:
         )
         db.add(unit)
         db.flush()
-        # 写入默认数据权限：confidential_level<=1 视为公开，全局可读；创建者本人始终可读
-        if data.get("confidential_level", 1) <= 1:
-            db.add(UnitPermission(unit_id=unit.id, target_type="global", target_id=0))
-        db.add(UnitPermission(unit_id=unit.id, target_type="user", target_id=user_id))
+        # 数据权限（2.9.4）：默认无任何访问权限，由管理员在权限配置弹窗中显式分配
         # 如果来源是知识缺口，标记缺口为已解决并关联新建单元
         gap_id = data.get("gap_id")
         if gap_id:
@@ -700,6 +715,8 @@ class KnowledgeService:
     def get_unit(self, db: Session, unit_id: int) -> dict:
         """GET /api/knowledge/units/{id}：查询知识单元详情与已配置的数据权限列表。"""
         unit = db.get(KnowledgeUnit, unit_id)
+        if not unit:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "知识单元不存在")
         perm_rows = db.execute(
             select(UnitPermission).where(UnitPermission.unit_id == unit_id)
         ).scalars()
@@ -722,6 +739,8 @@ class KnowledgeService:
 
         logger = logging.getLogger(__name__)
         unit = db.get(KnowledgeUnit, unit_id)
+        if not unit:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "知识单元不存在")
         for k in (
             "title",
             "content",
@@ -743,18 +762,7 @@ class KnowledgeService:
             unit.industry = self.normalize_industry(data["industry"])
         if "financing_round" in data:
             unit.financing_round = self.normalize_round(data["financing_round"])
-        # 同步保密级别与权限记录：公开(<=1) 自动加 global，私有(>1) 移除 global
-        if "confidential_level" in data:
-            new_cl = data["confidential_level"]
-            existing_global = db.execute(
-                select(UnitPermission).where(
-                    UnitPermission.unit_id == unit_id, UnitPermission.target_type == "global"
-                )
-            ).scalars().first()
-            if new_cl <= 1 and not existing_global:
-                db.add(UnitPermission(unit_id=unit_id, target_type="global", target_id=0))
-            elif new_cl > 1 and existing_global:
-                db.delete(existing_global)
+        # 权限仅通过权限配置接口显式管理（2.9.4），不再随保密级别自动增删
         unit.version += 1
         db.commit()
         try:

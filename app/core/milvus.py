@@ -25,13 +25,22 @@ logger = logging.getLogger(__name__)
 COLLECTION_NAME = f"{settings.milvus_collection_prefix}_units"
 _MILVUS_ALIAS = "default"
 
-# 向量索引参数（HNSW + COSINE，与 bge-m3 归一化向量匹配）
-_INDEX_PARAMS = {
-    "index_type": "HNSW",
-    "metric_type": "COSINE",
-    "params": {"M": 16, "efConstruction": 200},
-}
-_SEARCH_PARAMS = {"metric_type": "COSINE", "params": {"ef": 64}}
+def _index_params() -> dict:
+    """向量索引参数：Milvus Lite 仅支持 FLAT/IVF_FLAT/AUTOINDEX，独立 Milvus 用 HNSW。"""
+    if settings.milvus_lite_uri:
+        return {"index_type": "FLAT", "metric_type": "COSINE", "params": {}}
+    return {
+        "index_type": "HNSW",
+        "metric_type": "COSINE",
+        "params": {"M": 16, "efConstruction": 200},
+    }
+
+
+def _search_params() -> dict:
+    """检索参数：Lite 用 FLAT 无需 ef，独立 Milvus 用 HNSW ef。"""
+    if settings.milvus_lite_uri:
+        return {"metric_type": "COSINE", "params": {}}
+    return {"metric_type": "COSINE", "params": {"ef": 64}}
 
 _connected = False
 _collection: Collection | None = None
@@ -42,12 +51,19 @@ def _connect() -> None:
     global _connected
     if _connected:
         return
-    connections.connect(
-        alias=_MILVUS_ALIAS,
-        host=settings.milvus_host,
-        port=str(settings.milvus_port),
-        timeout=30,
-    )
+    if settings.milvus_lite_uri:
+        connections.connect(
+            alias=_MILVUS_ALIAS,
+            uri=settings.milvus_lite_uri,
+            timeout=30,
+        )
+    else:
+        connections.connect(
+            alias=_MILVUS_ALIAS,
+            host=settings.milvus_host,
+            port=str(settings.milvus_port),
+            timeout=30,
+        )
     _connected = True
 
 
@@ -72,7 +88,7 @@ def _ensure_index(collection: Collection) -> None:
     """确保 embedding 字段存在向量索引。"""
     if any(idx.field_name == "embedding" for idx in collection.indexes):
         return
-    collection.create_index(field_name="embedding", index_params=_INDEX_PARAMS)
+    collection.create_index(field_name="embedding", index_params=_index_params())
 
 
 def ensure_knowledge_collection() -> Collection:
@@ -143,7 +159,7 @@ def search_units(vector: list[float], top_k: int, filters: dict | None = None) -
     results = collection.search(
         data=[list(vector)],
         anns_field="embedding",
-        param=_SEARCH_PARAMS,
+        param=_search_params(),
         limit=top_k,
         output_fields=[
             "title",

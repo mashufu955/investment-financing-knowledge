@@ -1,6 +1,6 @@
 """02-组织与权限：团队/基金/项目范围、员工与角色管理（技能文档 02）。"""
 from fastapi import HTTPException, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
@@ -145,6 +145,8 @@ class OrgService:
     def update_user(self, db: Session, user_id: int, data: dict) -> dict:
         """PUT /api/org/users/{id}：编辑内部员工信息与角色关联。"""
         user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
         for k in ("display_name", "department_id", "status"):
             if k in data:
                 setattr(user, k, data[k])
@@ -158,12 +160,31 @@ class OrgService:
     def reset_password(self, db: Session, user_id: int, new_password: str) -> None:
         """重置员工密码。"""
         user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
         user.password_hash = hash_password(new_password)
+        db.commit()
+
+    def delete_user(self, db: Session, user_id: int) -> None:
+        """删除内部员工（同步清理角色关联；系统管理员不可删、不能删自己）。"""
+        if user_id == 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "系统管理员账号不可删除")
+        user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
+        # 解除团队负责人引用，避免遗留悬空 leader_id
+        db.execute(
+            update(Department).where(Department.leader_id == user_id).values(leader_id=None)
+        )
+        db.execute(delete(UserRole).where(UserRole.user_id == user_id))
+        db.delete(user)
         db.commit()
 
     def enable_disable_user(self, db: Session, user_id: int, enable: bool) -> None:
         """启停用员工账号。"""
         user = db.get(User, user_id)
+        if not user:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "用户不存在")
         user.status = 1 if enable else 0
         db.commit()
 

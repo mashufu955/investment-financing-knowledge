@@ -92,6 +92,7 @@
                   <td>{{ row.member_count ?? 0 }}</td>
                   <td>L{{ row._depth }}</td>
                   <td class="col-actions">
+                    <button class="btn btn-ghost btn-sm" @click="openCreate(row)">新增子节点</button>
                     <button class="btn btn-ghost btn-sm" @click="openEdit(row)">编辑</button>
                     <button class="btn btn-danger btn-sm" @click="onDelete(row)">删除</button>
                   </td>
@@ -120,6 +121,15 @@
             <div class="field">
               <label class="field-label">名称</label>
               <input v-model="editForm.name" class="input" placeholder="团队/基金/项目组名称" />
+            </div>
+            <div class="field">
+              <label class="field-label">父节点</label>
+              <select v-model="editForm.parent_id" class="select">
+                <option :value="null">— 顶级节点 —</option>
+                <option v-for="d in flatAll" :key="d.id" :value="d.id" :disabled="disabledParentIds.has(d.id)">
+                  {{ '　'.repeat(d._depth) }}{{ d.name }}（{{ typeMeta(d).label }}）
+                </option>
+              </select>
             </div>
             <div class="field">
               <label class="field-label">分类</label>
@@ -163,7 +173,7 @@ const users = ref([])
 const showEdit = ref(false)
 const editingNode = ref(null)     // null=新增  对象=编辑
 const editParent = ref(null)       // 新增时的父节点
-const editForm = ref({ name: '', dept_type: 'team', leader_id: null })
+const editForm = ref({ name: '', dept_type: 'team', parent_id: null, leader_id: null })
 const saving = ref(false)
 
 const showChildren = ref(false)
@@ -211,6 +221,38 @@ const flatChildren = computed(() => {
   return flattenDescendants(childrenNode.value.children || [])
 })
 
+// 全量扁平化（含所有层级），供「父节点」下拉选择
+const flatAll = computed(() => flattenDescendants(tree.value, 1))
+
+// 编辑时禁用的父节点候选：自身 + 自身所有后代（防止成环）；新增时无限制
+const disabledParentIds = computed(() => {
+  if (!editingNode.value) return new Set()
+  const ids = descendantIds(editingNode.value.id)
+  ids.add(editingNode.value.id)
+  return ids
+})
+
+// 返回某节点所有后代 id 集合（用于编辑时禁止把节点挂到自己的后代下，防止成环）
+function descendantIds(targetId) {
+  const ids = new Set()
+  const collect = (list) => {
+    for (const n of list || []) {
+      if (n.id === targetId) {
+        ;(function walk(node) {
+          for (const c of node.children || []) {
+            ids.add(c.id)
+            walk(c)
+          }
+        })(n)
+        return
+      }
+      collect(n.children)
+    }
+  }
+  collect(tree.value)
+  return ids
+}
+
 // ===== 数据加载 =====
 async function load() {
   const [deptRes, userRes] = await Promise.all([
@@ -229,7 +271,7 @@ function openCreate(parent) {
   const inferred = parent
     ? { team: 'fund', fund: 'project', project: 'sub', sub: 'sub' }[parent.dept_type || 'team'] || 'sub'
     : 'team'
-  editForm.value = { name: '', dept_type: inferred, leader_id: null }
+  editForm.value = { name: '', dept_type: inferred, parent_id: parent?.id ?? null, leader_id: null }
   showEdit.value = true
 }
 
@@ -239,6 +281,7 @@ function openEdit(node) {
   editForm.value = {
     name: node.name,
     dept_type: node.dept_type || 'sub',
+    parent_id: node.parent_id ?? null,
     leader_id: node.leader_id ?? null,
   }
   showEdit.value = true
@@ -246,12 +289,21 @@ function openEdit(node) {
 
 async function saveEdit() {
   if (!editForm.value.name.trim()) return
+  // 校验：父节点不能是自身或其任何后代（防止成环）
+  if (editingNode.value) {
+    const parentId = editForm.value.parent_id
+    if (parentId === editingNode.value.id || descendantIds(editingNode.value.id).has(parentId)) {
+      alert('父节点不能是自身或自己的子节点')
+      return
+    }
+  }
   saving.value = true
   try {
     if (editingNode.value) {
       await updateDepartment(editingNode.value.id, {
         name: editForm.value.name.trim(),
         dept_type: editForm.value.dept_type,
+        parent_id: editForm.value.parent_id,
         leader_id: editForm.value.leader_id,
       })
     } else {
@@ -259,7 +311,7 @@ async function saveEdit() {
         name: editForm.value.name.trim(),
         dept_type: editForm.value.dept_type,
         leader_id: editForm.value.leader_id,
-        parent_id: editParent.value?.id ?? null,
+        parent_id: editForm.value.parent_id,
         sort_order: 0,
       })
     }

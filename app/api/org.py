@@ -1,5 +1,5 @@
 """组织与权限接口：/api/org/*。"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_permission
@@ -63,7 +63,10 @@ def list_users(user: dict = Depends(get_current_user), db: Session = Depends(get
 @router.put("/users/{user_id}")
 def update_user(user_id: int, payload: UserUpdateRequest, user: dict = Depends(require_permission("org:user:manage")), db: Session = Depends(get_db)):
     """编辑内部员工。"""
-    return org_service.update_user(db, user_id, payload.model_dump())
+    # exclude_unset=True：只更新前端显式传入的字段。
+    # 若用 model_dump() 全量转换，Pydantic 会把未传的 Optional 字段（如 status）也带上 None，
+    # 导致 update_user 把 user.status 置 None → 违反 NOT NULL → 500 Internal Server Error。
+    return org_service.update_user(db, user_id, payload.model_dump(exclude_unset=True))
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -71,6 +74,15 @@ def reset_password(user_id: int, payload: dict, user: dict = Depends(require_per
     """重置员工密码。"""
     org_service.reset_password(db, user_id, payload["new_password"])
     return {"user_id": user_id}
+
+
+@router.delete("/users/{user_id}")
+def delete_user(user_id: int, user: dict = Depends(require_permission("org:user:manage")), db: Session = Depends(get_db)):
+    """删除内部员工（同步清理角色关联；系统管理员不可删）。"""
+    if user_id == int(user["user_id"]):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能删除当前登录账号")
+    org_service.delete_user(db, user_id)
+    return {"id": user_id}
 
 
 @router.post("/users/{user_id}/status")

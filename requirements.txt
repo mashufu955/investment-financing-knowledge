@@ -21,5 +21,6 @@ openai==1.*
 pypdf==4.*
 python-docx==1.*
 markdown-it-py==3.*
-# 向量化（按所选 embedding 模型启用）
-sentence-transformers==3.*
+# 向量化：默认走 OpenAI 兼容网关（SiliconFlow），无需本地权重；
+# 如需切回本地 bge-m3，取消下面这行注释并保持 EMBEDDING_PROVIDER=local
+# sentence-transformers==3.*

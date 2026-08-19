@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from datetime import datetime
 
+from fastapi import HTTPException, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -24,11 +25,16 @@ _FAQ_TTL = 24 * 3600
 _FAQ_PREFIX = "faq:"
 _FAQ_VERSION_SUFFIX = ":version"
 
+# 语义相似度阈值：由 bge-m3 余弦计算（原 Jaccard 0.85 对应余弦建议 0.75）
 _EXACT_THRESHOLD = 0.98
-_SEMANTIC_THRESHOLD = 0.85
+_SEMANTIC_THRESHOLD = 0.75
 
 _MINING_THRESHOLD = 3
 _GAP_TOP_K = 20
+
+# 语义匹配向量缓存（进程内，限制条数；FAQ 问题稳定，首轮后基本全命中）
+_EMBED_CACHE: dict[str, list[float]] = {}
+_EMBED_CACHE_MAX = 512
 
 
 class FaqService:
@@ -110,6 +116,8 @@ class FaqService:
     ) -> dict:
         """POST /api/settlement/faqs/{id}/review：审核 FAQ。"""
         faq = db.get(Faq, faq_id)
+        if not faq:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "FAQ 不存在")
         if action == "approve":
             if edited_answer:
                 faq.answer = edited_answer
@@ -128,6 +136,8 @@ class FaqService:
     def publish_faq(self, db: Session, faq_id: int) -> None:
         """审核通过后标记为 published 并写入高速缓存。"""
         faq = db.get(Faq, faq_id)
+        if not faq:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "FAQ 不存在")
         version = version_faq(faq_id)
         payload = {
             "faq_id": faq.id,
@@ -332,10 +342,42 @@ def trace_faq_hit(faq_id: int, question: str) -> None:
 
 
 def _similarity(a: str, b: str) -> float:
+    """语义相似度：优先 bge-m3 向量余弦，失败时回退字符 Jaccard。"""
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
+    try:
+        va = _embed_cached(a)
+        vb = _embed_cached(b)
+        return _cosine(va, vb)
+    except Exception:
+        return _jaccard(a, b)
+
+
+def _embed_cached(text: str) -> list[float]:
+    """按文本缓存 embedding 向量（进程内，避免重复调用网关）。"""
+    v = _EMBED_CACHE.get(text)
+    if v is not None:
+        return v
+    from app.utils.embeddings import embed_text
+
+    v = embed_text(text)
+    if len(_EMBED_CACHE) < _EMBED_CACHE_MAX:
+        _EMBED_CACHE[text] = v
+    return v
+
+
+def _cosine(va: list[float], vb: list[float]) -> float:
+    import math
+
+    dot = sum(x * y for x, y in zip(va, vb))
+    na = math.sqrt(sum(x * x for x in va)) or 1.0
+    nb = math.sqrt(sum(x * x for x in vb)) or 1.0
+    return round(dot / (na * nb), 6)
+
+
+def _jaccard(a: str, b: str) -> float:
     set_a, set_b = set(a), set(b)
     inter = len(set_a & set_b)
     union = len(set_a | set_b)

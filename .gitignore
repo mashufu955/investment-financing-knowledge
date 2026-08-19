@@ -188,4 +188,3 @@ cython_debug/
 /.venv/
 /.workbuddy/
 /models/
-/database.zip

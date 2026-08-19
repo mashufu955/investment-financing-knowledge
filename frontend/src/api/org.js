@@ -34,6 +34,10 @@ export function updateUser(id, data) {
   return request.put(`/org/users/${id}`, data)
 }
 
+export function deleteUser(id) {
+  return request.delete(`/org/users/${id}`)
+}
+
 export function resetPassword(id, data) {
   return request.post(`/org/users/${id}/reset-password`, data)
 }

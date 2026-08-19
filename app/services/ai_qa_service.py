@@ -5,6 +5,7 @@
 """
 import json
 import logging
+import re
 import time
 import uuid
 from typing import AsyncIterator
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 class AiQaService:
-    """AI 检索��问答鉴权服务。"""
+    """AI 检索与问答鉴权服务。"""
 
     def validate_login(self, db: Session, user_id: int) -> dict:
         """回答问题前校验用户登录态，获取用户所属团队、基金/项目范围与角色列表。"""
@@ -107,22 +108,31 @@ class AiQaService:
             return _keyword_only(db, question, filters)
 
     def filter_authorized_units(self, db: Session, user_id: int, unit_codes: list[str]) -> tuple:
-        """调用 POST /api/knowledge/check-permissions，过滤用户无权访问的投融资��识单元。"""
+        """调用 POST /api/knowledge/check-permissions，过滤用户无权访问的投融资知识单元。
+
+        返回 (authorized_codes, unauthorized_codes, unauthorized_units)，
+        其中 unauthorized_units 为含 title 的对象列表，供前端权限缺失卡片展示。
+        """
         rows = db.execute(
-            select(KnowledgeUnit.id, KnowledgeUnit.unit_code, KnowledgeUnit.confidential_level).where(
-                KnowledgeUnit.unit_code.in_(unit_codes)
-            )
+            select(
+                KnowledgeUnit.id,
+                KnowledgeUnit.unit_code,
+                KnowledgeUnit.title,
+                KnowledgeUnit.confidential_level,
+            ).where(KnowledgeUnit.unit_code.in_(unit_codes))
         ).all()
-        id_by_code = {code: (uid, cl) for uid, code, cl in rows}
-        context = build_permission_context(db, user_id, [uid for uid, _ in id_by_code.values()])
+        id_by_code = {code: (uid, title, cl) for uid, code, title, cl in rows}
+        context = build_permission_context(db, user_id, [uid for uid, _, _ in id_by_code.values()])
         authorized: list[str] = []
         unauthorized: list[str] = []
+        unauthorized_units: list[dict] = []
         for code in unit_codes:
             item = id_by_code.get(code)
             if item is None:
                 unauthorized.append(code)
+                unauthorized_units.append({"id": code, "unit_code": code, "title": code})
                 continue
-            uid, cl = item
+            uid, title, cl = item
             rules = db.execute(
                 select(UnitPermission).where(UnitPermission.unit_id == uid)
             ).scalars()
@@ -130,7 +140,8 @@ class AiQaService:
                 authorized.append(code)
             else:
                 unauthorized.append(code)
-        return authorized, unauthorized
+                unauthorized_units.append({"id": uid, "unit_code": code, "title": title})
+        return authorized, unauthorized, unauthorized_units
 
     def assemble_prompt(
         self,
@@ -172,15 +183,28 @@ class AiQaService:
         question: str,
         session_id: str | None,
     ) -> AsyncIterator[dict]:
-        """POST /api/ai/chat/stream：SSE 流式问答。"""
+        """POST /api/ai/chat/stream：SSE 流式问答。
+
+        事件流：status(retrieving) → trace → status(thinking) → status(generating) → answer* → sources → done
+        """
         start = time.time()
+
+        def _status(stage: str, message: str) -> dict:
+            return {
+                "event": "status",
+                "data": json.dumps({"stage": stage, "message": message}, ensure_ascii=False),
+            }
+
+        # 阶段1：检索知识
+        yield _status("retrieving", "正在检索投融资知识库…")
+
         user_context = self.validate_login(db, user_id)
         sess = self.manage_session(db, user_id, session_id)
         sid = sess["session_id"]
         filters = build_retrieval_filters(user_context)
         candidates = self.retrieve_candidates(db, question, user_context, filters)
         recalled_ids = [c["id"] for c in candidates]
-        auth_ids, unauth_ids = self.filter_authorized_units(db, user_id, recalled_ids)
+        auth_ids, unauth_ids, unauth_units = self.filter_authorized_units(db, user_id, recalled_ids)
         authorized_units = [c for c in candidates if c["id"] in set(auth_ids)]
         # 重排并截断到 TOP_K，提升相关性、减少 token 消耗
         authorized_units = rerank(authorized_units, question, user_context)
@@ -208,19 +232,30 @@ class AiQaService:
             ),
         }
 
+        # 阶段2：命中授权片段后，进入组织回答阶段
+        yield _status("thinking", f"已检索到 {len(authorized_units)} 个相关片段，正在组织回答…")
+
         history = _load_history(db, sid)
         prompt = self.assemble_prompt(question, authorized_units, history)
         guard_prompt_injection(prompt)
+
+        # 阶段3：LLM 流式生成
+        yield _status("generating", "正在生成回答…")
+
         full_answer = ""
-        async for chunk in self.stream_answer(prompt):
+        usage: dict = {}
+        async for chunk in self.stream_answer(prompt, usage):
             full_answer += chunk
             yield {"event": "answer", "data": json.dumps({"chunk": chunk}, ensure_ascii=False)}
         if permission_missing:
             yield {
                 "event": "permission_missing",
-                "data": json.dumps({"message": permission_missing, "unit_ids": unauth_ids}, ensure_ascii=False),
+                "data": json.dumps({"message": permission_missing, "unit_ids": unauth_ids, "units": unauth_units}, ensure_ascii=False),
             }
-        citations = build_citation_block(authorized_units)
+        # 仅保留 LLM 实际通过 [n] 引用的单元（assemble_prompt 中编号 1..len(authorized_units)）。
+        # 若 LLM 一个 [n] 都未标（懒标/拒答），回退到全部授权单元避免 sources 为空。
+        cited_units = _filter_cited_units(full_answer, authorized_units)
+        citations = build_citation_block(cited_units)
         yield {"event": "sources", "data": json.dumps(citations, ensure_ascii=False)}
         yield {
             "event": "done",
@@ -232,6 +267,7 @@ class AiQaService:
                     "confidence": compute_answer_confidence(authorized_units, []),
                     "permission_missing_notices": [permission_missing] if permission_missing else [],
                     "latency_ms": int((time.time() - start) * 1000),
+                    "usage": usage,
                 },
                 ensure_ascii=False,
             ),
@@ -253,12 +289,19 @@ class AiQaService:
                 "recalled_unit_ids_json": recalled_ids,
                 "authorized_unit_ids_json": auth_ids,
                 "unauthorized_unit_ids_json": unauth_ids,
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
                 "response_time_ms": int((time.time() - start) * 1000),
             },
         )
 
-    async def stream_answer(self, prompt: str) -> AsyncIterator[str]:
-        """生成并返回流式 Markdown 回答（SSE 事件生产者）。"""
+    async def stream_answer(self, prompt: str, usage: dict | None = None) -> AsyncIterator[str]:
+        """生成并返回流式 Markdown 回答（SSE 事件生产者）。
+
+        usage（可选 dict）会被填充 prompt_tokens/completion_tokens/total_tokens，
+        用于看板 Token 统计；网关不返回 usage 时保持为空（不阻塞流）。
+        """
         if settings.llm_api_key == "sk-xxx":
             text = (
                 "（占位回答）当前未配置 LLM API Key。\n\n"
@@ -273,17 +316,37 @@ class AiQaService:
             from openai import AsyncOpenAI
 
             client = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_api_base)
-            stream = await client.chat.completions.create(
-                model=settings.llm_model,
-                messages=[
-                    {"role": "system", "content": prompt.split("# Question")[0]},
-                    {"role": "user", "content": prompt.split("# Question")[-1]},
-                ],
-                temperature=_TEMPERATURE,
-                max_tokens=_MAX_TOKENS,
-                stream=True,
-            )
+            try:
+                stream = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=[
+                        {"role": "system", "content": prompt.split("# Question")[0]},
+                        {"role": "user", "content": prompt.split("# Question")[-1]},
+                    ],
+                    temperature=_TEMPERATURE,
+                    max_tokens=_MAX_TOKENS,
+                    stream=True,
+                    stream_options={"include_usage": True},  # 部分网关返回 usage（最后一块）
+                )
+            except TypeError:
+                # 网关不支持 stream_options 时降级
+                stream = await client.chat.completions.create(
+                    model=settings.llm_model,
+                    messages=[
+                        {"role": "system", "content": prompt.split("# Question")[0]},
+                        {"role": "user", "content": prompt.split("# Question")[-1]},
+                    ],
+                    temperature=_TEMPERATURE,
+                    max_tokens=_MAX_TOKENS,
+                    stream=True,
+                )
             async for event in stream:
+                # usage 通常出现在最后一个 chunk（choices 为空）
+                usage_data = getattr(event, "usage", None)
+                if usage_data and usage is not None:
+                    usage["prompt_tokens"] = getattr(usage_data, "prompt_tokens", None)
+                    usage["completion_tokens"] = getattr(usage_data, "completion_tokens", None)
+                    usage["total_tokens"] = getattr(usage_data, "total_tokens", None)
                 delta = event.choices[0].delta.content if event.choices else None
                 if delta:
                     produced = True
@@ -374,6 +437,29 @@ def build_citation_block(units: list[dict]) -> list[dict]:
     ]
 
 
+_CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+
+
+def _filter_cited_units(answer: str, authorized_units: list[dict]) -> list[dict]:
+    """从 LLM 回答中提取 [n] 引用标记（1-based，对应 authorized_units 列表），仅返回被引用的单元。
+
+    设计目的：assemble_prompt 已要求 LLM 用 [n] 标注来源（n 与 snippets 顺序一致），
+    前端「引用来源」面板只展示 LLM 真正用到的片段，避免把全部授权单元（可能含无关命中）都列出来。
+    若 LLM 没有任何 [n] 标注（拒答/懒标/被截断），回退到全部授权单元，保证 sources 始终非空。
+    """
+    if not answer or not authorized_units:
+        return authorized_units
+    n_max = len(authorized_units)
+    cited: set[int] = set()
+    for m in _CITATION_PATTERN.finditer(answer):
+        n = int(m.group(1))
+        if 1 <= n <= n_max:
+            cited.add(n - 1)
+    if not cited:
+        return authorized_units
+    return [authorized_units[i] for i in sorted(cited)]
+
+
 def compute_answer_confidence(units: list[dict], scores: list[float]) -> float:
     """基于召回分数和引用覆盖度输出低置信度标记。"""
     if not units:
@@ -406,7 +492,16 @@ def _merge_with_keyword(question: str, vector_candidates: list) -> list:
 
 
 def _merge_results(vector_candidates: list, bm25_resp) -> list:
-    """合并 Milvus 向量候选（list[dict]）与 ES BM25 命中（响应体），按加权分数降序。"""
+    """合并 Milvus 向量候选（list[dict]）与 ES BM25 命中（响应体），按加权分数降序。
+
+    BM25 原始分数无界，与 cosine（0~1）直接加权会主导排序；
+    先将 BM25 分数按本批最大分归一化到 0~1，再按 0.7/0.3 加权融合。
+    """
+    bm25_hits = (bm25_resp or {}).get("hits", {}).get("hits", [])
+    raw_bm25 = [float(hit.get("_score") or 0) for hit in bm25_hits]
+    bm25_max = max(raw_bm25, default=0.0) or 1.0
+    bm25_norm = {hit["_id"]: float(hit.get("_score") or 0) / bm25_max for hit in bm25_hits}
+
     merged: dict = {}
     for cand in vector_candidates:
         merged[cand["id"]] = {
@@ -422,16 +517,17 @@ def _merge_results(vector_candidates: list, bm25_resp) -> list:
             "confidential_level": cand.get("confidential_level"),
             "status": cand.get("status"),
         }
-    for hit in bm25_resp["hits"]["hits"]:
+    for hit in bm25_hits:
         key = hit["_id"]
+        norm = bm25_norm.get(key, 0.0)
         if key in merged:
-            merged[key]["score"] += _HYBRID_KEYWORD_WEIGHT * (hit.get("_score") or 0)
+            merged[key]["score"] += _HYBRID_KEYWORD_WEIGHT * norm
         else:
             src = hit.get("_source") or {}
             merged[key] = {
                 "id": key,
                 "unit_code": key,
-                "score": _HYBRID_KEYWORD_WEIGHT * (hit.get("_score") or 0),
+                "score": _HYBRID_KEYWORD_WEIGHT * norm,
                 "title": src.get("title"),
                 "content": src.get("content"),
                 "summary": src.get("summary"),
@@ -536,7 +632,7 @@ def _load_history(db: Session, session_id: str) -> list[dict]:
 
 def _placeholder_answer(prompt: str) -> str:
     return (
-        "1. 项目所处阶��与轮次需结合授权片段核实。\n"
+        "1. 项目所处阶段与轮次需结合授权片段核实。\n"
         "2. 当前命中知识单元已通过数据权限校验。\n"
         "3. 具体结论以引用卡片为准。"
     )

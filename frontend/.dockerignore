@@ -1,0 +1,9 @@
+# 本地依赖与构建产物不入镜像（容器内由 npm ci 重新安装）
+node_modules/
+dist/
+
+# IDE / 版本控制 / 日志
+.idea/
+.vscode/
+.git/
+*.log

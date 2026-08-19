@@ -2,7 +2,7 @@
 import json
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -35,11 +35,18 @@ def list_history_sessions(user: dict = Depends(get_current_user), db: Session = 
 
 @router.get("/sessions/{session_id}/messages")
 def list_session_messages(session_id: str, user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-    """获取指定会话的消息列表。"""
+    """获取指定会话的消息列表（校验会话归属，防止越权读取他人会话）。"""
     from sqlalchemy import select
 
-    from app.models.models import QaMessage
+    from app.models.models import QaMessage, QaSession
 
+    session = db.execute(
+        select(QaSession).where(
+            QaSession.session_id == session_id, QaSession.user_id == int(user["user_id"])
+        )
+    ).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
     rows = db.execute(
         select(QaMessage).where(QaMessage.session_id == session_id).order_by(QaMessage.created_at)
     ).scalars()

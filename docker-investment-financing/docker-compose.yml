@@ -1,36 +1,59 @@
-# 全部配置集中在项目根目录 .env（含 LLM、数据库、容器内部服务主机名等）。
-# docker compose 需通过 --env-file ../.env 读取（见 deploy.cmd / deploy.sh，README）。
+# ============================================================
+# 投融资知识管理平台 Docker Compose 编排
+# 架构：4 个核心服务（mysql / redis / elasticsearch / backend）
+#       + 可选监控栈（--profile monitoring：prometheus / grafana / loki）
+# 前端不再由 Docker 构建/托管（镜像构建与依赖拉取较慢），
+# 统一使用 npm run dev 启动 Vite 开发服务器（详见项目根 README.md）。
+# 向量存储使用嵌入式 Milvus Lite（backend 容器内 /app/data/milvus.db，命名卷持久化），
+# 不再需要 milvus / etcd / minio 独立容器。
+# 全部配置统一读取项目根目录 .env：
+#   docker compose --env-file ../.env up -d --build
+# 或使用本目录的 deploy.cmd（Windows）/ deploy.sh（Bash）入口。
+# ============================================================
+
+# 后端环境变量：统一从根目录 .env 插值，缺省值保证 compose 语法可校验
 x-backend-env: &backend-env
   APP_NAME: ${APP_NAME:-investment-finance}
   APP_ENV: ${APP_ENV:-production}
   DEBUG: ${DEBUG:-false}
   SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
   ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-120}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
 
+  # MySQL
   MYSQL_HOST: ${MYSQL_HOST:-mysql}
   MYSQL_PORT: ${MYSQL_PORT:-3306}
   MYSQL_USER: ${MYSQL_USER:-root}
   MYSQL_PASSWORD: ${MYSQL_PASSWORD:-rootpass}
   MYSQL_DATABASE: ${MYSQL_DATABASE:-investment_finance}
 
+  # Redis
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
 
+  # Elasticsearch（仅关键字 BM25 检索）
   ES_HOSTS: ${ES_HOSTS:-http://elasticsearch:9200}
   ES_INDEX_PREFIX: ${ES_INDEX_PREFIX:-if_knowledge}
 
+  # Milvus：默认嵌入式 Milvus Lite；改为独立 Milvus 服务时留空 MILVUS_LITE_URI
+  # 并配置 MILVUS_HOST / MILVUS_PORT（注意避开 pymilvus 保留的 MILVUS_URI）
+  MILVUS_LITE_URI: ${MILVUS_LITE_URI:-/app/data/milvus.db}
   MILVUS_HOST: ${MILVUS_HOST:-milvus}
   MILVUS_PORT: ${MILVUS_PORT:-19530}
+  MILVUS_COLLECTION_PREFIX: ${MILVUS_COLLECTION_PREFIX:-if_knowledge}
 
-  MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
-  MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minio}
-  MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
-
-  LLM_API_BASE: ${LLM_API_BASE:-https://api.openai.com/v1}
-  LLM_API_KEY: ${LLM_API_KEY:-sk-xxx}
-  LLM_MODEL: ${LLM_MODEL:-gpt-4o}
-  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+  # LLM / Embedding（OpenAI 兼容网关，SiliconFlow 等）
+  LLM_API_BASE: ${LLM_API_BASE:-https://api.siliconflow.cn/v1}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-deepseek-ai/DeepSeek-V4-Flash}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-api}
+  EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-https://api.siliconflow.cn/v1}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+  EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+  # 仅 EMBEDDING_PROVIDER=local 时使用，需自行挂载本地模型权重
   EMBEDDING_MODEL_PATH: ${EMBEDDING_MODEL_PATH:-/app/models/BAAI/bge-m3}
 
+  # 上传
   UPLOAD_DIR: ${UPLOAD_DIR:-/app/uploads}
   MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-50}
 
@@ -49,7 +72,7 @@ services:
       - --default-authentication-plugin=mysql_native_password
       - --max-connections=1000
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ../database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -66,7 +89,7 @@ services:
     container_name: ifk-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -85,10 +108,10 @@ services:
       discovery.type: single-node
       xpack.security.enabled: "false"
       xpack.security.enrollment.enabled: "false"
-      ES_JAVA_OPTS: "-Xms2g -Xmx2g"
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms2g -Xmx2g}
       TZ: Asia/Shanghai
     ports:
-      - "9200:9200"
+      - "127.0.0.1:9200:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
     healthcheck:
@@ -96,114 +119,6 @@ services:
       interval: 15s
       timeout: 10s
       retries: 20
-    networks:
-      - ifk-net
-
-  etcd:
-    image: quay.io/coreos/etcd:v3.5.5
-    container_name: ifk-etcd
-    restart: unless-stopped
-    environment:
-      ETCD_AUTO_COMPACTION_MODE: revision
-      ETCD_AUTO_COMPACTION_RETENTION: "1000"
-      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
-      ETCD_SNAPSHOT_COUNT: "50000"
-    volumes:
-      - etcd_data:/etcd
-    command:
-      - etcd
-      - -advertise-client-urls=http://etcd:2379
-      - -listen-client-urls=http://0.0.0.0:2379
-      - --data-dir=/etcd
-    networks:
-      - ifk-net
-
-  minio:
-    image: minio/minio:RELEASE.2024-04-18T19-09-19Z
-    container_name: ifk-minio
-    restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minio123}
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    networks:
-      - ifk-net
-
-  milvus:
-    image: milvusdb/milvus:v2.4.10
-    container_name: ifk-milvus
-    restart: unless-stopped
-    command: ["milvus", "run", "standalone"]
-    environment:
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: ${MINIO_ENDPOINT:-minio:9000}
-      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
-      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minio123}
-      TZ: Asia/Shanghai
-    depends_on:
-      - etcd
-      - minio
-    ports:
-      - "19530:19530"
-      - "9091:9091"
-    volumes:
-      - milvus_data:/var/lib/milvus
-    networks:
-      - ifk-net
-
-  prometheus:
-    image: prom/prometheus:v2.51.2
-    container_name: ifk-prometheus
-    restart: unless-stopped
-    volumes:
-      - ../deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.path=/prometheus
-    ports:
-      - "9090:9090"
-    networks:
-      - ifk-net
-
-  grafana:
-    image: grafana/grafana:10.4.2
-    container_name: ifk-grafana
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-    volumes:
-      - grafana_data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    depends_on:
-      - prometheus
-      - loki
-    networks:
-      - ifk-net
-
-  loki:
-    image: grafana/loki:2.9.4
-    container_name: ifk-loki
-    restart: unless-stopped
-    command: -config.file=/etc/loki/loki-config.yml
-    volumes:
-      - ../deploy/loki-config.yml:/etc/loki/loki-config.yml:ro
-      - loki_data:/loki
-    ports:
-      - "3100:3100"
     networks:
       - ifk-net
 
@@ -223,29 +138,67 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
-      milvus:
-        condition: service_started
-      minio:
-        condition: service_healthy
     volumes:
       - backend_uploads:/app/uploads
-      - ../models:/app/models:ro
+      - backend_milvus:/app/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
     networks:
       - ifk-net
 
-  frontend:
-    build:
-      context: ../frontend
-      dockerfile: Dockerfile
-    image: ifk-frontend:latest
-    container_name: ifk-frontend
+  # ==================== 监控栈（默认关闭） ====================
+  # 启动方式：docker compose --env-file ../.env --profile monitoring up -d
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: ifk-prometheus
     restart: unless-stopped
-    depends_on:
-      - backend
+    profiles: ["monitoring"]
+    volumes:
+      - ../deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
     ports:
-      - "5173:80"
+      - "127.0.0.1:9090:9090"
+    networks:
+      - ifk-net
+
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: ifk-loki
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ../deploy/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks:
+      - ifk-net
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: ifk-grafana
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
     networks:
       - ifk-net
 
@@ -253,13 +206,12 @@ volumes:
   mysql_data:
   redis_data:
   es_data:
-  etcd_data:
-  minio_data:
-  milvus_data:
   prometheus_data:
   grafana_data:
   loki_data:
   backend_uploads:
+  # Milvus Lite 单文件数据库（/app/data/milvus.db）
+  backend_milvus:
 
 networks:
   ifk-net:

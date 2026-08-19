@@ -42,7 +42,7 @@
 <script setup>
 import { reactive, ref, onMounted } from 'vue'
 import { configureUnitPermissions, getUnit } from '../../api/knowledge'
-import { listDepartments, listRoles } from '../../api/org'
+import { listDepartments, listRoles, listUsers } from '../../api/org'
 import PermissionSelector from '../../components/PermissionSelector.vue'
 
 const props = defineProps({
@@ -56,9 +56,10 @@ const users = ref([])
 const form = reactive({ global: false, departments: [], roles: [], users: [] })
 
 async function open_permission_dialog() {
-  const [dept, role] = await Promise.all([listDepartments(), listRoles()])
+  const [dept, role, usr] = await Promise.all([listDepartments(), listRoles(), listUsers()])
   departments.value = dept || []
   roles.value = role || []
+  users.value = usr || []
   const detail = await getUnit(props.unit.id)
   const summary = detail.permission_summary || []
   form.global = summary.some((p) => p.target_type === 'global')
